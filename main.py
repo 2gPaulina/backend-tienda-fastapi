@@ -26,10 +26,21 @@ try:
     db = client["puntoventaGCP"]  
     usuarios_col = db["usuarios"]
     productos_col = db["productos"]
+    categorias_col = db["categorias"]
+    marcas_col = db["marcas"]
+    historial_precios_col = db["historial_precios"]  # Nueva colección para auditoría de precios
+    tickets_col = db["tickets"]
     print("¡Conexión exitosa a MongoDB Atlas!")
 except Exception as e:
     print(f"Error al conectar a MongoDB Atlas: {e}")
 
+class CategoriaSchema(BaseModel):
+    nombre: str = Field(..., description="Nombre de la categoría, ej: Abarrotes")
+    descripcion: Optional[str] = Field(None, description="Descripción opcional")
+
+class MarcaSchema(BaseModel):
+    nombre: str = Field(..., description="Nombre de la marca, ej: Coca-Cola")
+    origen: Optional[str] = Field(None, description="Origen de la marca opcional")
 
 # 3. MODELOS DE VALIDACIÓN DE DATOS (PYDANTIC)
 class LoginRequest(BaseModel):
@@ -53,6 +64,15 @@ class ProductoSchema(BaseModel):
     creado_por: Optional[str] = ""
     activo: bool = True
 
+class HistorialPrecioSchema(BaseModel):
+    producto_id: str
+    nombre_producto: str
+    precio_compra_anterior: float
+    precio_compra_nuevo: float
+    precio_venta_anterior: float
+    precio_venta_nuevo: float
+    fecha_cambio: str
+    modificado_por: str
 
 # 4. FUNCIONES AUXILIARES PARA JWT Y CONTROL DE ACCESO
 def crear_access_token(data: dict, expires_delta: timedelta = timedelta(hours=2)):
@@ -158,29 +178,60 @@ def obtener_producto_por_id(producto_id: str):
 
 @app.put("/productos/{producto_id}", tags=["Productos"])
 def actualizar_producto(producto_id: str, datos_actualizados: ProductoSchema, token_data: dict = Depends(verificar_permiso_encargado)):
-    # Buscamos si el producto existe antes de intentar cambiarlo
+    # 1. Buscar si el producto existe antes de intentar cambiarlo
     producto_existente = productos_col.find_one({"_id": producto_id})
     if not producto_existente:
         raise HTTPException(status_code=404, detail="El producto no existe en la tiendita.")
     
-    # Convertimos los datos que mandó Android a un diccionario compatible con Mongo
+    # 2. Detectar si hubo un cambio en los precios (Compra o Venta)
+    precio_compra_viejo = float(producto_existente.get("precio_compra", 0.0))
+    precio_venta_viejo = float(producto_existente.get("precio_venta", 0.0))
+    
+    cambio_compra = precio_compra_viejo != datos_actualizados.precio_compra
+    cambio_venta = precio_venta_viejo != datos_actualizados.precio_venta
+    
+    # 3. Si hubo cambios, guardamos el registro de auditoría en la nueva colección
+    if cambio_compra or cambio_venta:
+        log_precio = {
+            "producto_id": producto_id,
+            "nombre_producto": producto_existente.get("nombre", "Desconocido"),
+            "precio_compra_anterior": precio_compra_viejo,
+            "precio_compra_nuevo": datos_actualizados.precio_compra,
+            "precio_venta_anterior": precio_venta_viejo,
+            "precio_venta_nuevo": datos_actualizados.precio_venta,
+            "fecha_cambio": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "modificado_por": token_data.get("nombre", "Encargado Anonimo")
+        }
+        historial_precios_col.insert_one(log_precio)
+    
+    # 4. Procesar la actualización normal del producto
     datos_dict = datos_actualizados.dict(by_alias=True, exclude={"id"})
     
-    # Preservamos la fecha de creación original para que no se borre
+    # Preservar metadatos originales
     datos_dict["fecha_creacion"] = producto_existente.get("fecha_creacion", datetime.utcnow().strftime("%Y-%m-%d"))
-    
-    # Inyectamos los nuevos metadatos de actualización
     datos_dict["fecha_actualizacion"] = datetime.utcnow().strftime("%Y-%m-%d")
-    datos_dict["creado_por"] = producto_existente.get("creado_por", "AppAndroid") # Mantiene quién lo creó originalmente
+    datos_dict["creado_por"] = producto_existente.get("creado_por", "AppAndroid")
     
-    # Hacemos el reemplazo en MongoDB
-    resultado = productos_col.update_one(
+    # Reemplazo en MongoDB
+    productos_col.update_one(
         {"_id": producto_id},
         {"$set": datos_dict}
     )
     
-    return {"status": "success", "message": f"Producto '{datos_actualizados.nombre}' actualizado correctamente por el Encargado."}
+    return {
+        "status": "success", 
+        "message": f"Producto '{datos_actualizados.nombre}' actualizado correctamente. Auditoría de precios registrada."
+    }
 
+@app.get("/productos/{producto_id}/historial-precios", tags=["Productos"])
+def obtener_historial_precios(producto_id: str, token_data: dict = Depends(verificar_permiso_encargado)):
+    cursor = historial_precios_col.find({"producto_id": producto_id}, {"_id": 0})
+    historial = [doc for doc in cursor]
+    return {
+        "producto_id": producto_id,
+        "total_actualizaciones": len(historial),
+        "historial": historial
+    }
 
 # Ruta de venta modificada para coincidir con Android 'ventas' (R3)
 @app.post("/ventas", tags=["Productos"])
@@ -209,6 +260,40 @@ def realizar_venta_producto(venta_req: dict):
         "inventario_nuevo": inventario_actual - cantidad
     }
 
+@app.post("/categorias", tags=["Categorías"], status_code=status.HTTP_201_CREATED)
+def crear_categoria(categoria: CategoriaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
+    # Buscamos si ya existe para no duplicar por nombre
+    existe = categorias_col.find_one({"nombre": categoria.nombre})
+    if existe:
+        raise HTTPException(status_code=400, detail=f"La categoría '{categoria.nombre}' ya existe.")
+    
+    nueva_cat = categoria.dict()
+    categorias_col.insert_one(nueva_cat)
+    return {"status": "success", "message": f"Categoría '{categoria.nombre}' registrada correctamente."}
+
+@app.get("/categorias", tags=["Categorías"])
+def listar_categorias():
+    # Retorna todas las categorías registradas (quitando el _id de Mongo para evitar errores de JSON)
+    cursor = categorias_col.find()
+    return [{"nombre": doc["nombre"], "descripcion": doc.get("descripcion", "")} for doc in cursor]
+
+
+# --- ENDPOINTS DE MARCAS ---
+@app.post("/marcas", tags=["Marcas"], status_code=status.HTTP_201_CREATED)
+def crear_marca(marca: MarcaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
+    existe = marcas_col.find_one({"nombre": marca.nombre})
+    if existe:
+        raise HTTPException(status_code=400, detail=f"La marca '{marca.nombre}' ya existe.")
+    
+    nueva_marca = marca.dict()
+    marcas_col.insert_one(nueva_marca)
+    return {"status": "success", "message": f"Marca '{marca.nombre}' registrada correctamente."}
+
+@app.get("/marcas", tags=["Marcas"])
+def listar_marcas():
+    cursor = marcas_col.find()
+    return [{"nombre": doc["nombre"], "origen": doc.get("origen", "")} for doc in cursor]
+
 
 @app.delete("/productos/{producto_id}", tags=["Productos"])
 def eliminar_producto(producto_id: str, token_data: dict = Depends(verificar_permiso_encargado)):
@@ -216,3 +301,21 @@ def eliminar_producto(producto_id: str, token_data: dict = Depends(verificar_per
     if resultado.matched_count == 0:
         raise HTTPException(status_code=404, detail="Producto no encontrado.")
     return {"status": "success", "message": "Producto dado de baja exitosamente."}
+
+# --- ELIMINAR CATEGORÍAS ---
+@app.delete("/categorias/{nombre}", tags=["Categorías"])
+def eliminar_categoria(nombre: str, token_data: dict = Depends(verificar_permiso_encargado)):
+    # Eliminación física en MongoDB
+    resultado = categorias_col.delete_one({"nombre": nombre})
+    if resultado.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="La categoría no existe.")
+    return {"status": "success", "message": f"Categoría '{nombre}' eliminada correctamente."}
+
+# --- ELIMINAR MARCAS ---
+@app.delete("/marcas/{nombre}", tags=["Marcas"])
+def eliminar_marca(nombre: str, token_data: dict = Depends(verificar_permiso_encargado)):
+    # Eliminación física en MongoDB
+    resultado = marcas_col.delete_one({"nombre": nombre})
+    if resultado.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="La marca no existe.")
+    return {"status": "success", "message": f"Marca '{nombre}' eliminada correctamente."}
