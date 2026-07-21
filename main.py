@@ -6,12 +6,21 @@ from fastapi import FastAPI, status, HTTPException, Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
 from pymongo import MongoClient
+from fastapi.middleware.cors import CORSMiddleware
 
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
     title="API de Punto de Venta e Inventario",
     description="Backend de servicios para la administración de usuarios y productos con JWT",
     version="1.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permite conexiones desde cualquier origen web
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Configuración de seguridad para JWT
