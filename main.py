@@ -386,4 +386,4 @@ def eliminar_marca(nombre: str, token_data: dict = Depends(verificar_permiso_enc
     resultado = marcas_col.delete_one({"nombre": nombre})
     if resultado.deleted_count == 0:
         raise HTTPException(status_code=404, detail="La marca no existe.")
-    return {"status": "success", "message": f"Marca '{nombre}' eliminada correctamente."}a
+    return {"status": "success", "message": f"Marca '{nombre}' eliminada correctamente."}
