@@ -17,6 +17,15 @@ app = FastAPI(
     version="1.0"
 )
 
+@app.exception_handler(RequestValidationError)
+def validation_exception_handler(request, exc):
+    # Esto imprimirá en la consola de Render/Servidor el error exacto
+    print("❌ ERROR DE VALIDACION EN PYDANTIC:", exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Permite conexiones desde cualquier origen web
@@ -25,14 +34,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request, exc):
-    # Esto imprimirá en la consola de Render/Servidor el error exacto
-    print("❌ ERROR DE VALIDACION EN PYDANTIC:", exc.errors())
-    return JSONResponse(
-        status_code=422,
-        content={"detail": exc.errors()},
-    )
 
 # Configuración de seguridad para JWT
 JWT_SECRET = "super_secret_key_12345"
