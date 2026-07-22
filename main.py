@@ -1,7 +1,9 @@
 import os
+import re
 import jwt
+import unicodedata
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Union, Any
 from fastapi import FastAPI, status, HTTPException, Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
@@ -9,7 +11,6 @@ from pymongo import MongoClient
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from typing import Optional, List, Union, Any
 
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
@@ -25,7 +26,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # Configuración de seguridad para JWT
 JWT_SECRET = "super_secret_key_12345"
@@ -57,6 +57,7 @@ class LoginRequest(BaseModel):
     correo: str
 
 class CategoriaSchema(BaseModel):
+    id: Optional[str] = Field(None, alias="_id")
     nombre: str = Field(..., description="Nombre de la categoría, ej: Abarrotes")
     descripcion: Optional[str] = Field(None, description="Descripción opcional")
 
@@ -70,6 +71,7 @@ class DistribuidorSchema(BaseModel):
 
 # Esquema de Marca (con referencia a Distribuidor y Proveedor)
 class MarcaSchema(BaseModel):
+    id: Optional[str] = Field(None, alias="_id")
     nombre: str = Field(..., description="Nombre de la marca, ej: Coca-Cola")
     origen: Optional[str] = Field(None, description="Origen de la marca opcional")
     distribuidor: Optional[str] = Field(None, description="Nombre o ID del distribuidor asociado")
@@ -77,7 +79,7 @@ class MarcaSchema(BaseModel):
 
 class ProveedorSchema(BaseModel):
     nombre: str
-    direccion: str
+    direccion: Optional[str] = ""
 
 class ProductoSchema(BaseModel):
     id: str = Field(..., alias="_id", description="Código de barras")
@@ -103,7 +105,14 @@ class HistorialPrecioSchema(BaseModel):
     modificado_por: str
 
 
-# 4. FUNCIONES AUXILIARES PARA JWT Y CONTROL DE ACCESO
+# 4. FUNCIONES AUXILIARES PARA JWT, BÚSQUEDA Y CONTROL DE ACCESO
+
+def crear_regex_insensible(texto: str) -> str:
+    """Genera una expresión regular insensible a mayúsculas, minúsculas y acentos"""
+    texto_normalizado = unicodedata.normalize('NFD', texto)
+    texto_sin_acentos = ''.join(c for c in texto_normalizado if unicodedata.category(c) != 'Mn')
+    return f"^{re.escape(texto_sin_acentos)}$"
+
 def crear_access_token(data: dict, expires_delta: timedelta = timedelta(hours=2)):
     to_encode = data.copy()
     expire = datetime.utcnow() + expires_delta
@@ -289,35 +298,63 @@ def eliminar_producto(producto_id: str, token_data: dict = Depends(verificar_per
     return {"status": "success", "message": "Producto dado de baja exitosamente."}
 
 
-# 8. MÓDULO DE CATEGORÍAS
+# 8. MÓDULO DE CATEGORÍAS (PROTEGIDO)
 
 @app.post("/categorias", tags=["Categorías"], status_code=status.HTTP_201_CREATED)
 def crear_categoria(categoria: CategoriaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
-    existe = categorias_col.find_one({"nombre": categoria.nombre})
+    regex = crear_regex_insensible(categoria.nombre)
+    existe = categorias_col.find_one({"nombre": {"$regex": regex, "$options": "i"}})
     if existe:
-        raise HTTPException(status_code=400, detail=f"La categoría '{categoria.nombre}' ya existe.")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"La categoría '{categoria.nombre}' ya existe o es muy similar a '{existe['nombre']}'."
+        )
     
-    nueva_cat = categoria.dict()
+    nueva_cat = categoria.dict(exclude={"id"})
     categorias_col.insert_one(nueva_cat)
     return {"status": "success", "message": f"Categoría '{categoria.nombre}' registrada correctamente."}
 
 @app.get("/categorias", tags=["Categorías"])
 def listar_categorias():
     cursor = categorias_col.find()
-    return [{"nombre": doc["nombre"], "descripcion": doc.get("descripcion", "")} for doc in cursor]
+    return [{"_id": str(doc["_id"]), "nombre": doc["nombre"], "descripcion": doc.get("descripcion", "")} for doc in cursor]
 
 @app.put("/categorias/{nombre}", tags=["Categorías"])
 def actualizar_categoria(nombre: str, categoria: CategoriaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
-    resultado = categorias_col.update_one({"nombre": nombre}, {"$set": categoria.dict()})
+    regex = crear_regex_insensible(nombre)
+    resultado = categorias_col.update_one({"nombre": {"$regex": regex, "$options": "i"}}, {"$set": categoria.dict(exclude={"id"})})
     if resultado.matched_count == 0:
         raise HTTPException(status_code=404, detail="La categoría no existe.")
+    
+    # Actualización en cascada para productos existentes
+    if nombre != categoria.nombre:
+        productos_col.update_many(
+            {"categoria_nombre": {"$regex": regex, "$options": "i"}},
+            {"$set": {"categoria_nombre": categoria.nombre}}
+        )
+        
     return {"status": "success", "message": f"Categoría '{nombre}' actualizada correctamente."}
 
 @app.delete("/categorias/{nombre}", tags=["Categorías"])
 def eliminar_categoria(nombre: str, token_data: dict = Depends(verificar_permiso_encargado)):
-    resultado = categorias_col.delete_one({"nombre": nombre})
+    regex = crear_regex_insensible(nombre)
+    
+    # Validación contra productos huérfanos
+    producto_asociado = productos_col.find_one({
+        "categoria_nombre": {"$regex": regex, "$options": "i"},
+        "activo": True
+    })
+    
+    if producto_asociado:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"No se puede eliminar la categoría '{nombre}' porque tiene productos activos asociados (ej. '{producto_asociado['nombre']}')."
+        )
+
+    resultado = categorias_col.delete_one({"nombre": {"$regex": regex, "$options": "i"}})
     if resultado.deleted_count == 0:
         raise HTTPException(status_code=404, detail="La categoría no existe.")
+        
     return {"status": "success", "message": f"Categoría '{nombre}' eliminada correctamente."}
 
 
@@ -350,15 +387,19 @@ def crear_distribuidor(dist: DistribuidorSchema, token_data: dict = Depends(veri
     return {"status": "success", "message": f"Distribuidor '{dist.nombre}' registrado correctamente."}
 
 
-# 10. MÓDULO DE MARCAS (ACTUALIZADO CON PROVEEDOR Y DISTRIBUIDOR)
+# 10. MÓDULO DE MARCAS (PROTEGIDO Y ACTUALIZADO)
 
 @app.post("/marcas", tags=["Marcas"], status_code=status.HTTP_201_CREATED)
 def crear_marca(marca: MarcaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
-    existe = marcas_col.find_one({"nombre": marca.nombre})
+    regex = crear_regex_insensible(marca.nombre)
+    existe = marcas_col.find_one({"nombre": {"$regex": regex, "$options": "i"}})
     if existe:
-        raise HTTPException(status_code=400, detail=f"La marca '{marca.nombre}' ya existe.")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"La marca '{marca.nombre}' ya existe o es muy similar a '{existe['nombre']}'."
+        )
     
-    nueva_marca = marca.dict()
+    nueva_marca = marca.dict(exclude={"id"})
     marcas_col.insert_one(nueva_marca)
     return {"status": "success", "message": f"Marca '{marca.nombre}' registrada correctamente."}
 
@@ -367,6 +408,7 @@ def listar_marcas():
     cursor = marcas_col.find()
     return [
         {
+            "_id": str(doc["_id"]),
             "nombre": doc["nombre"],
             "origen": doc.get("origen", ""),
             "distribuidor": doc.get("distribuidor", ""),
@@ -377,14 +419,38 @@ def listar_marcas():
 
 @app.put("/marcas/{nombre}", tags=["Marcas"])
 def actualizar_marca(nombre: str, marca: MarcaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
-    resultado = marcas_col.update_one({"nombre": nombre}, {"$set": marca.dict()})
+    regex = crear_regex_insensible(nombre)
+    resultado = marcas_col.update_one({"nombre": {"$regex": regex, "$options": "i"}}, {"$set": marca.dict(exclude={"id"})})
     if resultado.matched_count == 0:
         raise HTTPException(status_code=404, detail="La marca no existe.")
+    
+    # Actualización en cascada para productos existentes
+    if nombre != marca.nombre:
+        productos_col.update_many(
+            {"marca_nombre": {"$regex": regex, "$options": "i"}},
+            {"$set": {"marca_nombre": marca.nombre}}
+        )
+
     return {"status": "success", "message": f"Marca '{nombre}' actualizada correctamente."}
 
 @app.delete("/marcas/{nombre}", tags=["Marcas"])
 def eliminar_marca(nombre: str, token_data: dict = Depends(verificar_permiso_encargado)):
-    resultado = marcas_col.delete_one({"nombre": nombre})
+    regex = crear_regex_insensible(nombre)
+    
+    # Validación contra productos huérfanos
+    producto_asociado = productos_col.find_one({
+        "marca_nombre": {"$regex": regex, "$options": "i"},
+        "activo": True
+    })
+    
+    if producto_asociado:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"No se puede eliminar la marca '{nombre}' porque tiene productos activos asociados (ej. '{producto_asociado['nombre']}')."
+        )
+
+    resultado = marcas_col.delete_one({"nombre": {"$regex": regex, "$options": "i"}})
     if resultado.deleted_count == 0:
         raise HTTPException(status_code=404, detail="La marca no existe.")
+        
     return {"status": "success", "message": f"Marca '{nombre}' eliminada correctamente."}
