@@ -7,6 +7,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
 from pymongo import MongoClient
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
@@ -22,6 +24,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    # Esto imprimirá en la consola de Render/Servidor el error exacto
+    print("❌ ERROR DE VALIDACION EN PYDANTIC:", exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
 
 # Configuración de seguridad para JWT
 JWT_SECRET = "super_secret_key_12345"
@@ -383,4 +394,4 @@ def eliminar_marca(nombre: str, token_data: dict = Depends(verificar_permiso_enc
     resultado = marcas_col.delete_one({"nombre": nombre})
     if resultado.deleted_count == 0:
         raise HTTPException(status_code=404, detail="La marca no existe.")
-    return {"status": "success", "message": f"Marca '{nombre}' eliminada correctamente."}
+    return {"status": "success", "message": f"Marca '{nombre}' eliminada correctamente."}a
