@@ -9,6 +9,7 @@ from pymongo import MongoClient
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from typing import Optional, List, Union, Any
 
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
@@ -87,7 +88,7 @@ class ProductoSchema(BaseModel):
     inventario: int
     categoria_nombre: str
     marca_nombre: str
-    proveedor: Optional[str] = "General"
+    proveedor: Union[str, ProveedorSchema, dict, None] = "General"
     creado_por: Optional[str] = ""
     activo: bool = True
 
