@@ -17,15 +17,6 @@ app = FastAPI(
     version="1.0"
 )
 
-@app.exception_handler(RequestValidationError)
-def validation_exception_handler(request, exc):
-    # Esto imprimirá en la consola de Render/Servidor el error exacto
-    print("❌ ERROR DE VALIDACION EN PYDANTIC:", exc.errors())
-    return JSONResponse(
-        status_code=422,
-        content={"detail": exc.errors()},
-    )
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Permite conexiones desde cualquier origen web
@@ -96,7 +87,7 @@ class ProductoSchema(BaseModel):
     inventario: int
     categoria_nombre: str
     marca_nombre: str
-    proveedor: ProveedorSchema
+    proveedor: Optional[str] = "General"
     creado_por: Optional[str] = ""
     activo: bool = True
 
