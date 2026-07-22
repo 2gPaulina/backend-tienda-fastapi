@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
     title="API de Punto de Venta e Inventario",
-    description="Backend de servicios para la administración de usuarios y productos con JWT",
+    description="Backend de servicios para la administración de usuarios, productos, marcas, categorías, proveedores y distribuidores con JWT",
     version="1.0"
 )
 
@@ -37,24 +37,39 @@ try:
     productos_col = db["productos"]
     categorias_col = db["categorias"]
     marcas_col = db["marcas"]
-    historial_precios_col = db["historial_precios"]  # Nueva colección para auditoría de precios
+    proveedores_col = db["proveedores"]        # Colección de Proveedores independientes
+    distribuidores_col = db["distribuidores"]  # Colección de Distribuidores independientes
+    historial_precios_col = db["historial_precios"]  # Auditoría de precios
     tickets_col = db["tickets"]
     print("¡Conexión exitosa a MongoDB Atlas!")
 except Exception as e:
     print(f"Error al conectar a MongoDB Atlas: {e}")
 
+
+# 3. MODELOS DE VALIDACIÓN DE DATOS (PYDANTIC)
+
+class LoginRequest(BaseModel):
+    firebase_token: str
+    correo: str
+
 class CategoriaSchema(BaseModel):
     nombre: str = Field(..., description="Nombre de la categoría, ej: Abarrotes")
     descripcion: Optional[str] = Field(None, description="Descripción opcional")
 
+# Esquema para la colección independiente de Proveedores
+class ProveedorColeccionSchema(BaseModel):
+    nombre: str = Field(..., description="Nombre del proveedor")
+
+# Esquema para la colección independiente de Distribuidores
+class DistribuidorSchema(BaseModel):
+    nombre: str = Field(..., description="Nombre del distribuidor")
+
+# Esquema de Marca (con referencia a Distribuidor y Proveedor)
 class MarcaSchema(BaseModel):
     nombre: str = Field(..., description="Nombre de la marca, ej: Coca-Cola")
     origen: Optional[str] = Field(None, description="Origen de la marca opcional")
-
-# 3. MODELOS DE VALIDACIÓN DE DATOS (PYDANTIC)
-class LoginRequest(BaseModel):
-    firebase_token: str
-    correo: str
+    distribuidor: Optional[str] = Field(None, description="Nombre o ID del distribuidor asociado")
+    proveedor: Optional[str] = Field(None, description="Nombre o ID del proveedor asociado")
 
 class ProveedorSchema(BaseModel):
     nombre: str
@@ -82,6 +97,7 @@ class HistorialPrecioSchema(BaseModel):
     precio_venta_nuevo: float
     fecha_cambio: str
     modificado_por: str
+
 
 # 4. FUNCIONES AUXILIARES PARA JWT Y CONTROL DE ACCESO
 def crear_access_token(data: dict, expires_delta: timedelta = timedelta(hours=2)):
@@ -120,8 +136,7 @@ def pantalla_de_test():
     }
 
 
-# 6. ENDPOINT: INICIO DE SESIÓN CON JWT (CORREGIDA RUTA PARA ANDROID)
-##@app.post("/login", tags=["Autenticación"])
+# 6. ENDPOINT: INICIO DE SESIÓN CON JWT
 @app.post("/auth/login", tags=["Autenticación"])
 def login_usuario(login_data: LoginRequest):
     usuario_db = usuarios_col.find_one({"correo": login_data.correo})
@@ -150,7 +165,7 @@ def login_usuario(login_data: LoginRequest):
     }
 
 
-# 7. MÓDULO DE PRODUCTOS (CORREGIDAS RUTAS SIN '/' AL FINAL PARA EVITAR REDIRECTS 307)
+# 7. MÓDULO DE PRODUCTOS
 
 @app.post("/productos", tags=["Productos"], status_code=status.HTTP_201_CREATED)
 def crear_producto(producto: ProductoSchema, token_data: dict = Depends(verificar_permiso_encargado)):
@@ -187,19 +202,16 @@ def obtener_producto_por_id(producto_id: str):
 
 @app.put("/productos/{producto_id}", tags=["Productos"])
 def actualizar_producto(producto_id: str, datos_actualizados: ProductoSchema, token_data: dict = Depends(verificar_permiso_encargado)):
-    # 1. Buscar si el producto existe antes de intentar cambiarlo
     producto_existente = productos_col.find_one({"_id": producto_id})
     if not producto_existente:
         raise HTTPException(status_code=404, detail="El producto no existe en la tiendita.")
     
-    # 2. Detectar si hubo un cambio en los precios (Compra o Venta)
     precio_compra_viejo = float(producto_existente.get("precio_compra", 0.0))
     precio_venta_viejo = float(producto_existente.get("precio_venta", 0.0))
     
     cambio_compra = precio_compra_viejo != datos_actualizados.precio_compra
     cambio_venta = precio_venta_viejo != datos_actualizados.precio_venta
     
-    # 3. Si hubo cambios, guardamos el registro de auditoría en la nueva colección
     if cambio_compra or cambio_venta:
         log_precio = {
             "producto_id": producto_id,
@@ -213,15 +225,12 @@ def actualizar_producto(producto_id: str, datos_actualizados: ProductoSchema, to
         }
         historial_precios_col.insert_one(log_precio)
     
-    # 4. Procesar la actualización normal del producto
     datos_dict = datos_actualizados.dict(by_alias=True, exclude={"id"})
     
-    # Preservar metadatos originales
     datos_dict["fecha_creacion"] = producto_existente.get("fecha_creacion", datetime.utcnow().strftime("%Y-%m-%d"))
     datos_dict["fecha_actualizacion"] = datetime.utcnow().strftime("%Y-%m-%d")
     datos_dict["creado_por"] = producto_existente.get("creado_por", "AppAndroid")
     
-    # Reemplazo en MongoDB
     productos_col.update_one(
         {"_id": producto_id},
         {"$set": datos_dict}
@@ -242,7 +251,6 @@ def obtener_historial_precios(producto_id: str, token_data: dict = Depends(verif
         "historial": historial
     }
 
-# Ruta de venta modificada para coincidir con Android 'ventas' (R3)
 @app.post("/ventas", tags=["Productos"])
 def realizar_venta_producto(venta_req: dict):
     producto_id = venta_req.get("codigo_barras")
@@ -269,9 +277,18 @@ def realizar_venta_producto(venta_req: dict):
         "inventario_nuevo": inventario_actual - cantidad
     }
 
+@app.delete("/productos/{producto_id}", tags=["Productos"])
+def eliminar_producto(producto_id: str, token_data: dict = Depends(verificar_permiso_encargado)):
+    resultado = productos_col.update_one({"_id": producto_id}, {"$set": {"activo": False}})
+    if resultado.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Producto no encontrado.")
+    return {"status": "success", "message": "Producto dado de baja exitosamente."}
+
+
+# 8. MÓDULO DE CATEGORÍAS
+
 @app.post("/categorias", tags=["Categorías"], status_code=status.HTTP_201_CREATED)
 def crear_categoria(categoria: CategoriaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
-    # Buscamos si ya existe para no duplicar por nombre
     existe = categorias_col.find_one({"nombre": categoria.nombre})
     if existe:
         raise HTTPException(status_code=400, detail=f"La categoría '{categoria.nombre}' ya existe.")
@@ -282,12 +299,55 @@ def crear_categoria(categoria: CategoriaSchema, token_data: dict = Depends(verif
 
 @app.get("/categorias", tags=["Categorías"])
 def listar_categorias():
-    # Retorna todas las categorías registradas (quitando el _id de Mongo para evitar errores de JSON)
     cursor = categorias_col.find()
     return [{"nombre": doc["nombre"], "descripcion": doc.get("descripcion", "")} for doc in cursor]
 
+@app.put("/categorias/{nombre}", tags=["Categorías"])
+def actualizar_categoria(nombre: str, categoria: CategoriaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
+    resultado = categorias_col.update_one({"nombre": nombre}, {"$set": categoria.dict()})
+    if resultado.matched_count == 0:
+        raise HTTPException(status_code=404, detail="La categoría no existe.")
+    return {"status": "success", "message": f"Categoría '{nombre}' actualizada correctamente."}
 
-# --- ENDPOINTS DE MARCAS ---
+@app.delete("/categorias/{nombre}", tags=["Categorías"])
+def eliminar_categoria(nombre: str, token_data: dict = Depends(verificar_permiso_encargado)):
+    resultado = categorias_col.delete_one({"nombre": nombre})
+    if resultado.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="La categoría no existe.")
+    return {"status": "success", "message": f"Categoría '{nombre}' eliminada correctamente."}
+
+
+# 9. MÓDULO DE PROVEEDORES Y DISTRIBUIDORES (NUEVAS COLECCIONES)
+
+@app.get("/proveedores", tags=["Proveedores"])
+def listar_proveedores():
+    cursor = proveedores_col.find()
+    return [{"_id": str(doc["_id"]), "nombre": doc["nombre"]} for doc in cursor]
+
+@app.post("/proveedores", tags=["Proveedores"], status_code=status.HTTP_201_CREATED)
+def crear_proveedor_coleccion(prov: ProveedorColeccionSchema, token_data: dict = Depends(verificar_permiso_encargado)):
+    existe = proveedores_col.find_one({"nombre": prov.nombre})
+    if existe:
+        raise HTTPException(status_code=400, detail=f"El proveedor '{prov.nombre}' ya existe.")
+    proveedores_col.insert_one(prov.dict())
+    return {"status": "success", "message": f"Proveedor '{prov.nombre}' registrado correctamente."}
+
+@app.get("/distribuidores", tags=["Distribuidores"])
+def listar_distribuidores():
+    cursor = distribuidores_col.find()
+    return [{"_id": str(doc["_id"]), "nombre": doc["nombre"]} for doc in cursor]
+
+@app.post("/distribuidores", tags=["Distribuidores"], status_code=status.HTTP_201_CREATED)
+def crear_distribuidor(dist: DistribuidorSchema, token_data: dict = Depends(verificar_permiso_encargado)):
+    existe = distribuidores_col.find_one({"nombre": dist.nombre})
+    if existe:
+        raise HTTPException(status_code=400, detail=f"El distribuidor '{dist.nombre}' ya existe.")
+    distribuidores_col.insert_one(dist.dict())
+    return {"status": "success", "message": f"Distribuidor '{dist.nombre}' registrado correctamente."}
+
+
+# 10. MÓDULO DE MARCAS (ACTUALIZADO CON PROVEEDOR Y DISTRIBUIDOR)
+
 @app.post("/marcas", tags=["Marcas"], status_code=status.HTTP_201_CREATED)
 def crear_marca(marca: MarcaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
     existe = marcas_col.find_one({"nombre": marca.nombre})
@@ -301,29 +361,25 @@ def crear_marca(marca: MarcaSchema, token_data: dict = Depends(verificar_permiso
 @app.get("/marcas", tags=["Marcas"])
 def listar_marcas():
     cursor = marcas_col.find()
-    return [{"nombre": doc["nombre"], "origen": doc.get("origen", "")} for doc in cursor]
+    return [
+        {
+            "nombre": doc["nombre"],
+            "origen": doc.get("origen", ""),
+            "distribuidor": doc.get("distribuidor", ""),
+            "proveedor": doc.get("proveedor", "")
+        }
+        for doc in cursor
+    ]
 
-
-@app.delete("/productos/{producto_id}", tags=["Productos"])
-def eliminar_producto(producto_id: str, token_data: dict = Depends(verificar_permiso_encargado)):
-    resultado = productos_col.update_one({"_id": producto_id}, {"$set": {"activo": False}})
+@app.put("/marcas/{nombre}", tags=["Marcas"])
+def actualizar_marca(nombre: str, marca: MarcaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
+    resultado = marcas_col.update_one({"nombre": nombre}, {"$set": marca.dict()})
     if resultado.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Producto no encontrado.")
-    return {"status": "success", "message": "Producto dado de baja exitosamente."}
+        raise HTTPException(status_code=404, detail="La marca no existe.")
+    return {"status": "success", "message": f"Marca '{nombre}' actualizada correctamente."}
 
-# --- ELIMINAR CATEGORÍAS ---
-@app.delete("/categorias/{nombre}", tags=["Categorías"])
-def eliminar_categoria(nombre: str, token_data: dict = Depends(verificar_permiso_encargado)):
-    # Eliminación física en MongoDB
-    resultado = categorias_col.delete_one({"nombre": nombre})
-    if resultado.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="La categoría no existe.")
-    return {"status": "success", "message": f"Categoría '{nombre}' eliminada correctamente."}
-
-# --- ELIMINAR MARCAS ---
 @app.delete("/marcas/{nombre}", tags=["Marcas"])
 def eliminar_marca(nombre: str, token_data: dict = Depends(verificar_permiso_encargado)):
-    # Eliminación física en MongoDB
     resultado = marcas_col.delete_one({"nombre": nombre})
     if resultado.deleted_count == 0:
         raise HTTPException(status_code=404, detail="La marca no existe.")
