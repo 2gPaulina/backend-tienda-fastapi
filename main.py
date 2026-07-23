@@ -326,41 +326,31 @@ def registrar_consumo_propio(req: dict):
     
     inventario_actual = producto.get("inventario", 0)
     if inventario_actual < cantidad:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Stock insuficiente. Solo quedan {inventario_actual} unidades."
-        )
+        raise HTTPException(status_code=400, detail=f"Stock insuficiente ({inventario_actual} disp).")
     
-    # 1. Descontar del inventario
-    productos_col.update_one(
-        {"_id": producto_id},
-        {"$inc": {"inventario": -cantidad}}
-    )
+    productos_col.update_one({"_id": producto_id}, {"$inc": {"inventario": -cantidad}})
     
     precio_unitario = float(producto.get("precio_venta", 0.0))
-    costo_total = precio_unitario * cantidad
     
-    # 2. Guardar registro especial de Consumo Propio (total: 0 para no afectar caja)
     fecha_actual = datetime.utcnow()
     registro_consumo = {
         "producto_id": producto_id,
         "nombre_producto": producto.get("nombre", ""),
         "cantidad": cantidad,
         "precio_unitario": precio_unitario,
-        "total": 0.0,  # 👈 En 0.0 para que el corte de caja NO espere dinero por esto
-        "costo_real": costo_total, # Guardamos el valor nominal como referencia
+        "total": 0.0, # Total 0 para NO afectar caja
+        "costo_real": precio_unitario * cantidad,
         "vendedor_correo": correo_usuario,
         "tipo": "CONSUMO_PROPIO",
         "motivo": motivo,
         "fecha": fecha_actual.strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    # Se guarda en la colección de tickets o consumo_propio según prefieras
     tickets_col.insert_one(registro_consumo)
     
     return {
         "status": "success",
-        "message": f"Consumo propio registrado ({cantidad}x {producto.get('nombre')})",
+        "message": f"Consumo registrado ({cantidad}x {producto.get('nombre')})",
         "inventario_nuevo": inventario_actual - cantidad
     }
 
