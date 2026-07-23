@@ -310,6 +310,60 @@ def listar_cortes_caja():
         cortes.append(doc)
     return cortes
 
+# -------------------------------------------------------------
+# REGISTRAR CONSUMO PROPIO
+# -------------------------------------------------------------
+@app.post("/consumo-propio", tags=["Productos"])
+def registrar_consumo_propio(req: dict):
+    producto_id = req.get("codigo_barras") or req.get("producto_id")
+    cantidad = int(req.get("cantidad", 1))
+    correo_usuario = req.get("correo_usuario") or req.get("correo") or "carlos.mendoza@tiendita.com"
+    motivo = req.get("motivo", "Consumo Empleado")
+    
+    producto = productos_col.find_one({"_id": producto_id})
+    if not producto:
+        raise HTTPException(status_code=404, detail="Producto no encontrado.")
+    
+    inventario_actual = producto.get("inventario", 0)
+    if inventario_actual < cantidad:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Stock insuficiente. Solo quedan {inventario_actual} unidades."
+        )
+    
+    # 1. Descontar del inventario
+    productos_col.update_one(
+        {"_id": producto_id},
+        {"$inc": {"inventario": -cantidad}}
+    )
+    
+    precio_unitario = float(producto.get("precio_venta", 0.0))
+    costo_total = precio_unitario * cantidad
+    
+    # 2. Guardar registro especial de Consumo Propio (total: 0 para no afectar caja)
+    fecha_actual = datetime.utcnow()
+    registro_consumo = {
+        "producto_id": producto_id,
+        "nombre_producto": producto.get("nombre", ""),
+        "cantidad": cantidad,
+        "precio_unitario": precio_unitario,
+        "total": 0.0,  # 👈 En 0.0 para que el corte de caja NO espere dinero por esto
+        "costo_real": costo_total, # Guardamos el valor nominal como referencia
+        "vendedor_correo": correo_usuario,
+        "tipo": "CONSUMO_PROPIO",
+        "motivo": motivo,
+        "fecha": fecha_actual.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    # Se guarda en la colección de tickets o consumo_propio según prefieras
+    tickets_col.insert_one(registro_consumo)
+    
+    return {
+        "status": "success",
+        "message": f"Consumo propio registrado ({cantidad}x {producto.get('nombre')})",
+        "inventario_nuevo": inventario_actual - cantidad
+    }
+
 # 7. MÓDULO DE PRODUCTOS
 @app.post("/productos", tags=["Productos"], status_code=status.HTTP_201_CREATED)
 def crear_producto(producto: ProductoSchema, token_data: dict = Depends(verificar_permiso_encargado)):
