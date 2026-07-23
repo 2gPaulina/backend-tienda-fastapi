@@ -178,9 +178,73 @@ def login_usuario(login_data: LoginRequest):
         }
     }
 
+@app.get("/caja/corte-automatico", tags=["Corte de Caja"])
+def corte_caja_automatico(correo: str):
+    """
+    Recibe el correo del usuario, busca su Rol en la tabla 'usuarios'
+    y si es Empleado/Cajero calcula el corte de caja de sus ventas.
+    """
+    # 1. Buscamos el usuario DIRECTO en la tabla usuarios de MongoDB
+    usuario_db = usuarios_col.find_one({"correo": correo})
+    
+    if not usuario_db:
+        raise HTTPException(status_code=404, detail=f"El usuario con correo {correo} no existe en la tabla usuarios.")
+    
+    rol = usuario_db.get("rol", "Cajero")
+    nombre = usuario_db.get("nombre", "Empleado")
+
+    # 2. Si el rol en la tabla es 'Encargado', NO hace corte de ventas
+    if rol == "Encargado":
+        return {
+            "status": "skipped",
+            "message": f"El usuario {nombre} es Encargado. No realiza ventas directas en caja.",
+            "rol": rol,
+            "total_acumulado": 0.0
+        }
+
+    # 3. Si es Empleado/Cajero, sumamos sus ventas del día desde la tabla 'tickets'
+    hoy_inicio = datetime.utcnow().strftime("%Y-%m-%d 00:00:00")
+    hoy_fin = datetime.utcnow().strftime("%Y-%m-%d 23:59:59")
+    
+    tickets = tickets_col.find({
+        "fecha": {"$gte": hoy_inicio, "$lte": hoy_fin},
+        "vendedor_correo": correo
+    })
+    
+    total_efectivo = sum(ticket.get("total", 0.0) for ticket in tickets)
+    
+    # 4. Guardamos el historial en la tabla 'cortes_caja'
+    corte_data = {
+        "usuario_nombre": nombre,
+        "usuario_correo": correo,
+        "usuario_rol": rol,
+        "monto_efectivo_declarado": total_efectivo,
+        "total_calculado": total_efectivo,
+        "observaciones": "Corte automático generado al cerrar sesión",
+        "fecha_corte": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    cortes_caja_col.insert_one(corte_data)
+    
+    return {
+        "status": "success",
+        "message": f"Corte registrado exitosamente para {nombre}.",
+        "rol": rol,
+        "total_acumulado": total_efectivo
+    }
+
+# HISTORIAL DE CORTES PARA EL ADMIN / ENCARGADO
+@app.get("/caja/cortes", tags=["Corte de Caja"])
+def listar_cortes_caja():
+    """Muestra la lista de cortes guardados"""
+    cursor = cortes_caja_col.find()
+    cortes = []
+    for doc in cursor:
+        doc["_id"] = str(doc["_id"])
+        cortes.append(doc)
+    return cortes
 
 # 7. MÓDULO DE PRODUCTOS
-
 @app.post("/productos", tags=["Productos"], status_code=status.HTTP_201_CREATED)
 def crear_producto(producto: ProductoSchema, token_data: dict = Depends(verificar_permiso_encargado)):
     existe = productos_col.find_one({"_id": producto.id})
