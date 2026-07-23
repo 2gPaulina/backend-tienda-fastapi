@@ -148,6 +148,35 @@ def pantalla_de_test():
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
 
+# 🔴 ENDPOINT: Conteo automático de ventas para el Corte de Caja
+@app.get("/caja/corte-automatico", tags=["Corte de Caja"])
+def corte_caja_automatico(token_data: dict = Depends(obtener_usuario_logueado)):
+    """Calcula automáticamente el total vendido en el día actual para el usuario logueado"""
+    hoy_inicio = datetime.utcnow().strftime("%Y-%m-%d 00:00:00")
+    hoy_fin = datetime.utcnow().strftime("%Y-%m-%d 23:59:59")
+    
+    # Buscamos los tickets realizados hoy (puedes filtrar también por usuario si guardas su ID)
+    tickets = tickets_col.find({
+        "fecha": {"$gte": hoy_inicio, "$lte": hoy_fin}
+    })
+    
+    total_efectivo = sum(ticket.get("total", 0.0) for ticket in tickets)
+    
+    corte_data = {
+        "usuario_nombre": token_data.get("nombre", "Usuario"),
+        "usuario_rol": token_data.get("rol", "Cajero"),
+        "total_calculado": total_efectivo,
+        "fecha_corte": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    # Guardamos el registro automático en la BD
+    cortes_caja_col.insert_one(corte_data)
+    
+    return {
+        "status": "success",
+        "message": "Corte automático generado con éxito",
+        "total_acumulado": total_efectivo
+    }
 
 # 6. ENDPOINT: INICIO DE SESIÓN CON JWT
 @app.post("/auth/login", tags=["Autenticación"])
@@ -455,32 +484,3 @@ def eliminar_marca(nombre: str, token_data: dict = Depends(verificar_permiso_enc
         
     return {"status": "success", "message": f"Marca '{nombre}' eliminada correctamente."}
 
-# 🔴 ENDPOINT: Conteo automático de ventas para el Corte de Caja
-@app.get("/caja/corte-automatico", tags=["Corte de Caja"])
-def corte_caja_automatico(token_data: dict = Depends(obtener_usuario_logueado)):
-    """Calcula automáticamente el total vendido en el día actual para el usuario logueado"""
-    hoy_inicio = datetime.utcnow().strftime("%Y-%m-%d 00:00:00")
-    hoy_fin = datetime.utcnow().strftime("%Y-%m-%d 23:59:59")
-    
-    # Buscamos los tickets realizados hoy (puedes filtrar también por usuario si guardas su ID)
-    tickets = tickets_col.find({
-        "fecha": {"$gte": hoy_inicio, "$lte": hoy_fin}
-    })
-    
-    total_efectivo = sum(ticket.get("total", 0.0) for ticket in tickets)
-    
-    corte_data = {
-        "usuario_nombre": token_data.get("nombre", "Usuario"),
-        "usuario_rol": token_data.get("rol", "Cajero"),
-        "total_calculado": total_efectivo,
-        "fecha_corte": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    
-    # Guardamos el registro automático en la BD
-    cortes_caja_col.insert_one(corte_data)
-    
-    return {
-        "status": "success",
-        "message": "Corte automático generado con éxito",
-        "total_acumulado": total_efectivo
-    }
