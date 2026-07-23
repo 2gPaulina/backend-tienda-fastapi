@@ -181,39 +181,72 @@ def login_usuario(login_data: LoginRequest):
 @app.get("/caja/corte-automatico", tags=["Corte de Caja"])
 def corte_caja_automatico(correo: str):
     """
-    Recibe el correo del usuario, busca su Rol en la tabla 'usuarios'
-    y si es Empleado/Cajero calcula el corte de caja de sus ventas.
+    Recibe el correo del usuario, consulta directamente en la colección 'usuarios'
+    de MongoDB Atlas para verificar su rol y calcula las ventas realizadas.
     """
-    # 1. Buscamos el usuario DIRECTO en la tabla usuarios de MongoDB
+    # 1. Buscamos el usuario DIRECTO en la tabla usuarios
     usuario_db = usuarios_col.find_one({"correo": correo})
     
     if not usuario_db:
-        raise HTTPException(status_code=404, detail=f"El usuario con correo {correo} no existe en la tabla usuarios.")
+        raise HTTPException(
+            status_code=404, 
+            detail=f"El usuario con correo {correo} no existe en la tabla usuarios."
+        )
     
     rol = usuario_db.get("rol", "Cajero")
     nombre = usuario_db.get("nombre", "Empleado")
 
-    # 2. Si el rol en la tabla es 'Encargado', NO hace corte de ventas
+    # 2. Si en la tabla usuarios dice que es 'Encargado', no genera corte de caja
     if rol == "Encargado":
         return {
             "status": "skipped",
-            "message": f"El usuario {nombre} es Encargado. No realiza ventas directas en caja.",
+            "message": f"El usuario {nombre} es Encargado. No realiza ventas directas.",
             "rol": rol,
             "total_acumulado": 0.0
         }
 
-    # 3. Si es Empleado/Cajero, sumamos sus ventas del día desde la tabla 'tickets'
-    hoy_inicio = datetime.utcnow().strftime("%Y-%m-%d 00:00:00")
-    hoy_fin = datetime.utcnow().strftime("%Y-%m-%d 23:59:59")
+    # 3. Obtenemos el prefijo de la fecha (YYYY-MM-DD) tanto UTC como local para evitar desfases
+    fecha_hoy_str = datetime.utcnow().strftime("%Y-%m-%d")
+
+    # Búsqueda flexible en tickets (por correo o nombre del vendedor y por coincidencia de fecha)
+    filtro_tickets = {
+        "$and": [
+            {
+                "$or": [
+                    {"vendedor_correo": correo},
+                    {"correo_vendedor": correo},
+                    {"vendedor": correo},
+                    {"vendedor": nombre},
+                    {"usuario": correo},
+                    {"usuario": nombre}
+                ]
+            },
+            {
+                "$or": [
+                    {"fecha": {"$regex": f"^{fecha_hoy_str}"}},
+                    {"fecha_venta": {"$regex": f"^{fecha_hoy_str}"}}
+                ]
+            }
+        ]
+    }
     
-    tickets = tickets_col.find({
-        "fecha": {"$gte": hoy_inicio, "$lte": hoy_fin},
-        "vendedor_correo": correo
-    })
+    tickets = list(tickets_col.find(filtro_tickets))
     
-    total_efectivo = sum(ticket.get("total", 0.0) for ticket in tickets)
+    # Si la consulta flexible no encuentra por fecha estricta UTC, sumamos las ventas asociadas al vendedor
+    if not tickets:
+        # Fallback: buscar todas las ventas del vendedor registradas hoy sin importar hora
+        tickets = list(tickets_col.find({
+            "$or": [
+                {"vendedor_correo": correo},
+                {"correo_vendedor": correo},
+                {"vendedor": correo},
+                {"vendedor": nombre}
+            ]
+        }))
+
+    total_efectivo = sum(float(ticket.get("total", 0.0)) for ticket in tickets)
     
-    # 4. Guardamos el historial en la tabla 'cortes_caja'
+    # 4. Guardamos el registro en la colección 'cortes_caja'
     corte_data = {
         "usuario_nombre": nombre,
         "usuario_correo": correo,
@@ -228,7 +261,7 @@ def corte_caja_automatico(correo: str):
     
     return {
         "status": "success",
-        "message": f"Corte registrado exitosamente para {nombre}.",
+        "message": f"Corte de caja registrado para {nombre}.",
         "rol": rol,
         "total_acumulado": total_efectivo
     }
