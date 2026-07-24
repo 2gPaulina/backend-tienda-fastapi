@@ -11,6 +11,8 @@ from pymongo import MongoClient
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from datetime import datetime
+from fastapi import HTTPException, status
 
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
@@ -183,11 +185,9 @@ def login_usuario(login_data: LoginRequest):
 # -------------------------------------------------------------
 @app.post("/ventas", tags=["Productos"])
 def realizar_venta_producto(venta_req: dict):
-    # Detectamos el código de barras venga como venga
     producto_id = venta_req.get("codigo_barras") or venta_req.get("producto_id") or venta_req.get("_id")
     cantidad = int(venta_req.get("cantidad", 1))
     
-    # Intentamos obtener el vendedor de cualquier campo posible
     vendedor_correo = (
         venta_req.get("correo_vendedor") or 
         venta_req.get("correo") or 
@@ -215,7 +215,6 @@ def realizar_venta_producto(venta_req: dict):
     precio_unitario = float(producto.get("precio_venta", 0.0))
     total_venta = precio_unitario * cantidad
     
-    # GUARDAR EN MONGODB (Con fecha limpia YYYY-MM-DD)
     fecha_actual = datetime.utcnow()
     nuevo_ticket = {
         "producto_id": producto_id,
@@ -224,7 +223,9 @@ def realizar_venta_producto(venta_req: dict):
         "precio_unitario": precio_unitario,
         "total": total_venta,
         "vendedor_correo": vendedor_correo,
-        "fecha_str": fecha_actual.strftime("%Y-%m-%d"), # Útil para filtros
+        "tipo": "VENTA",                     # <-- Identifica la transacción
+        "procesado_en_corte": False,         # <-- CLAVE: Nace sin cortar
+        "fecha_str": fecha_actual.strftime("%Y-%m-%d"),
         "fecha": fecha_actual.strftime("%Y-%m-%d %H:%M:%S")
     }
     tickets_col.insert_one(nuevo_ticket)
@@ -244,7 +245,6 @@ def corte_caja_automatico(correo: str):
     usuario_db = usuarios_col.find_one({"correo": correo})
     
     if not usuario_db:
-        # Si por alguna razón no encuentra el correo exacto, no rompemos la app
         nombre = "Carlos Mendoza"
         rol = "Empleado"
     else:
@@ -259,27 +259,30 @@ def corte_caja_automatico(correo: str):
             "total_acumulado": 0.0
         }
 
-    # BÚSQUEDA ULTRA FLEXIBLE:
-    # 1. Buscamos por correo en cualquier campo
-    # 2. O si está vacío, traemos los tickets registrados en general para no dejar el corte en $0
-    tickets = list(tickets_col.find({
+    # BÚSQUEDA PRECISA:
+    # Solo tomamos tickets del vendedor actual QUE NO HAYAN SIDO CORTADOS Y QUE SEAN VENTAS
+    filtro_tickets = {
         "$or": [
             {"vendedor_correo": correo},
             {"correo_vendedor": correo},
-            {"vendedor": correo},
-            {"vendedor_correo": {"$exists": True}} # Respaldo si hay tickets guardados
-        ]
-    }))
+            {"vendedor": correo}
+        ],
+        "procesado_en_corte": False, # <-- Solo lo que no se ha cortado
+        "tipo": "VENTA"              # <-- Solo ventas reales (Excluye consumos)
+    }
+    tickets_pendientes = list(tickets_col.find(filtro_tickets))
 
-    # Sumamos todos los totales asegurando conversión a float
     total_efectivo = 0.0
-    for ticket in tickets:
+    ids_tickets_a_cerrar = []
+
+    for ticket in tickets_pendientes:
         try:
             total_efectivo += float(ticket.get("total", 0.0))
+            ids_tickets_a_cerrar.append(ticket["_id"])
         except (ValueError, TypeError):
             pass
             
-    # Guardamos el resultado final en cortes_caja
+    # Guardamos el resultado del corte en la colección de cortes
     corte_data = {
         "usuario_nombre": nombre,
         "usuario_correo": correo,
@@ -289,8 +292,14 @@ def corte_caja_automatico(correo: str):
         "observaciones": "Corte automático generado al cerrar sesión",
         "fecha_corte": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     }
-    
     cortes_caja_col.insert_one(corte_data)
+
+    # MARCAR LOS TICKETS COMO PROCESADOS PARA QUE EL PRÓXIMO TURNO EMPIECE EN $0.00
+    if ids_tickets_a_cerrar:
+        tickets_col.update_many(
+            {"_id": {"$in": ids_tickets_a_cerrar}},
+            {"$set": {"procesado_en_corte": True}}
+        )
     
     return {
         "status": "success",
@@ -331,17 +340,18 @@ def registrar_consumo_propio(req: dict):
     productos_col.update_one({"_id": producto_id}, {"$inc": {"inventario": -cantidad}})
     
     precio_unitario = float(producto.get("precio_venta", 0.0))
-    
     fecha_actual = datetime.utcnow()
+    
     registro_consumo = {
         "producto_id": producto_id,
         "nombre_producto": producto.get("nombre", ""),
         "cantidad": cantidad,
         "precio_unitario": precio_unitario,
-        "total": 0.0, # Total 0 para NO afectar caja
+        "total": 0.0,
         "costo_real": precio_unitario * cantidad,
         "vendedor_correo": correo_usuario,
         "tipo": "CONSUMO_PROPIO",
+        "procesado_en_corte": True,         # <-- CLAVE: Marcado True para que el corte NO lo tome jamás
         "motivo": motivo,
         "fecha": fecha_actual.strftime("%Y-%m-%d %H:%M:%S")
     }
