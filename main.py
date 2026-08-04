@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from datetime import datetime
 from fastapi import HTTPException, status
+from fastapi import WebSocket, WebSocketDisconnect
 
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
@@ -107,6 +108,27 @@ class HistorialPrecioSchema(BaseModel):
     fecha_cambio: str
     modificado_por: str
 
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        # Envía la notificación a todos los teléfonos/clientes conectados al mismo tiempo
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except Exception:
+                pass
+
+manager = ConnectionManager()
 
 # 4. FUNCIONES AUXILIARES PARA JWT, BÚSQUEDA Y CONTROL DE ACCESO
 
@@ -139,6 +161,15 @@ def verificar_permiso_encargado(authorization: Optional[str] = Header(None)):
     except Exception:
         raise HTTPException(status_code=401, detail="Token inválido o expirado")
 
+@app.websocket("/ws/productos")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Mantiene la conexión abierta escuchando mensajes
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
 # 5. ENDPOINT: PANTALLA DE TEST
 @app.get("/", tags=["Test"])
