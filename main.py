@@ -11,8 +11,8 @@ from pymongo import MongoClient
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi import WebSocket, WebSocketDisconnect
-
+from datetime import datetime
+from fastapi import HTTPException, status
 
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
@@ -23,7 +23,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Permite conexiones desde cualquier origen web
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -35,6 +35,7 @@ JWT_ALGORITHM = "HS256"
 
 # 2. CONEXIÓN A MONGODB ATLAS
 MONGO_URI = "mongodb+srv://paulinagarcia_db_user:ORH5JJkOLEmbdjPn@cluster0.j5bk6c4.mongodb.net/?appName=Cluster0"
+
 try:
     client = MongoClient(MONGO_URI)
     db = client["puntoventaGCP"]  
@@ -42,16 +43,18 @@ try:
     productos_col = db["productos"]
     categorias_col = db["categorias"]
     marcas_col = db["marcas"]
-    proveedores_col = db["proveedores"]
-    distribuidores_col = db["distribuidores"]
-    historial_precios_col = db["historial_precios"]
+    proveedores_col = db["proveedores"]        # Colección de Proveedores independientes
+    distribuidores_col = db["distribuidores"]  # Colección de Distribuidores independientes
+    historial_precios_col = db["historial_precios"]  # Auditoría de precios
     tickets_col = db["tickets"]
     cortes_caja_col = db["cortes_caja"]
     print("¡Conexión exitosa a MongoDB Atlas!")
 except Exception as e:
     print(f"Error al conectar a MongoDB Atlas: {e}")
 
+
 # 3. MODELOS DE VALIDACIÓN DE DATOS (PYDANTIC)
+
 class LoginRequest(BaseModel):
     firebase_token: str
     correo: str
@@ -61,12 +64,15 @@ class CategoriaSchema(BaseModel):
     nombre: str = Field(..., description="Nombre de la categoría, ej: Abarrotes")
     descripcion: Optional[str] = Field(None, description="Descripción opcional")
 
+# Esquema para la colección independiente de Proveedores
 class ProveedorColeccionSchema(BaseModel):
     nombre: str = Field(..., description="Nombre del proveedor")
 
+# Esquema para la colección independiente de Distribuidores
 class DistribuidorSchema(BaseModel):
     nombre: str = Field(..., description="Nombre del distribuidor")
 
+# Esquema de Marca (con referencia a Distribuidor y Proveedor)
 class MarcaSchema(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
     nombre: str = Field(..., description="Nombre de la marca, ej: Coca-Cola")
@@ -101,46 +107,11 @@ class HistorialPrecioSchema(BaseModel):
     fecha_cambio: str
     modificado_por: str
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: str):
-        # Transmite a todos los dispositivos conectados
-        for connection in list(self.active_connections):
-            try:
-                await connection.send_text(message)
-            except Exception:
-                self.disconnect(connection)
-
-manager = ConnectionManager()
-
-security = HTTPBearer()
-
-def verificar_permiso_encargado(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if not credentials or not credentials.credentials:
-        raise HTTPException(status_code=401, detail="Token no proporcionado")
-    
-    token = credentials.credentials
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        
-        if payload.get("rol") != "Encargado":
-            raise HTTPException(status_code=403, detail="No tienes permisos (Requiere Encargado)")
-        return payload
-    except Exception:
-        raise HTTPException(status_code=401, detail="Token inválido o expirado")
 
 # 4. FUNCIONES AUXILIARES PARA JWT, BÚSQUEDA Y CONTROL DE ACCESO
+
 def crear_regex_insensible(texto: str) -> str:
+    """Genera una expresión regular insensible a mayúsculas, minúsculas y acentos"""
     texto_normalizado = unicodedata.normalize('NFD', texto)
     texto_sin_acentos = ''.join(c for c in texto_normalizado if unicodedata.category(c) != 'Mn')
     return f"^{re.escape(texto_sin_acentos)}$"
@@ -151,15 +122,23 @@ def crear_access_token(data: dict, expires_delta: timedelta = timedelta(hours=2)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-
-@app.websocket("/ws/productos")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+# Función de seguridad para validar el rol directamente desde el encabezado Authorization
+def verificar_permiso_encargado(authorization: Optional[str] = Header(None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Token no proporcionado")
+    
     try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        # Quitamos el prefijo 'Bearer ' que manda Android
+        token = authorization.split(" ")[1]
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        
+        # Validación estricta del rol guardado en la base de datos
+        if payload.get("rol") != "Encargado":
+            raise HTTPException(status_code=403, detail="No tienes permisos (Requiere Encargado)")
+        return payload
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+
 
 # 5. ENDPOINT: PANTALLA DE TEST
 @app.get("/", tags=["Test"])
@@ -171,6 +150,7 @@ def pantalla_de_test():
         "database_connected": "puntoventaGCP @ MongoDB Atlas",
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
+
 
 # 6. ENDPOINT: INICIO DE SESIÓN CON JWT
 @app.post("/auth/login", tags=["Autenticación"])
@@ -201,10 +181,10 @@ def login_usuario(login_data: LoginRequest):
     }
 
 # -------------------------------------------------------------
-# REGISTRAR VENTA (NOTIFICA POR WEBSOCKET)
+# REGISTRAR VENTA
 # -------------------------------------------------------------
 @app.post("/ventas", tags=["Productos"])
-async def realizar_venta_producto(venta_req: dict):
+def realizar_venta_producto(venta_req: dict):
     producto_id = venta_req.get("codigo_barras") or venta_req.get("producto_id") or venta_req.get("_id")
     cantidad = int(venta_req.get("cantidad", 1))
     
@@ -243,15 +223,12 @@ async def realizar_venta_producto(venta_req: dict):
         "precio_unitario": precio_unitario,
         "total": total_venta,
         "vendedor_correo": vendedor_correo,
-        "tipo": "VENTA",
-        "procesado_en_corte": False,
+        "tipo": "VENTA",                     # <-- Identifica la transacción
+        "procesado_en_corte": False,         # <-- CLAVE: Nace sin cortar
         "fecha_str": fecha_actual.strftime("%Y-%m-%d"),
         "fecha": fecha_actual.strftime("%Y-%m-%d %H:%M:%S")
     }
     tickets_col.insert_one(nuevo_ticket)
-    
-    # EMISIÓN EN TIEMPO REAL
-    await manager.broadcast("PRODUCTO_ACTUALIZADO")
     
     return {
         "status": "sold",
@@ -259,8 +236,9 @@ async def realizar_venta_producto(venta_req: dict):
         "inventario_nuevo": inventario_actual - cantidad
     }
 
+
 # -------------------------------------------------------------
-# CORTE DE CAJA
+# CORTE DE CAJA (BÚSQUEDA A PRUEBA DE FALLOS)
 # -------------------------------------------------------------
 @app.get("/caja/corte-automatico", tags=["Corte de Caja"])
 def corte_caja_automatico(correo: str):
@@ -272,6 +250,7 @@ def corte_caja_automatico(correo: str):
     else:
         rol = usuario_db.get("rol", "Cajero")
         nombre = usuario_db.get("nombre", "Empleado")
+
     if rol == "Encargado":
         return {
             "status": "skipped",
@@ -279,19 +258,23 @@ def corte_caja_automatico(correo: str):
             "rol": rol,
             "total_acumulado": 0.0
         }
-    
+
+    # BÚSQUEDA PRECISA:
+    # Solo tomamos tickets del vendedor actual QUE NO HAYAN SIDO CORTADOS Y QUE SEAN VENTAS
     filtro_tickets = {
         "$or": [
             {"vendedor_correo": correo},
             {"correo_vendedor": correo},
             {"vendedor": correo}
         ],
-        "procesado_en_corte": False,
-        "tipo": "VENTA"
+        "procesado_en_corte": False, # <-- Solo lo que no se ha cortado
+        "tipo": "VENTA"              # <-- Solo ventas reales (Excluye consumos)
     }
     tickets_pendientes = list(tickets_col.find(filtro_tickets))
+
     total_efectivo = 0.0
     ids_tickets_a_cerrar = []
+
     for ticket in tickets_pendientes:
         try:
             total_efectivo += float(ticket.get("total", 0.0))
@@ -299,6 +282,7 @@ def corte_caja_automatico(correo: str):
         except (ValueError, TypeError):
             pass
             
+    # Guardamos el resultado del corte en la colección de cortes
     corte_data = {
         "usuario_nombre": nombre,
         "usuario_correo": correo,
@@ -309,7 +293,8 @@ def corte_caja_automatico(correo: str):
         "fecha_corte": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     }
     cortes_caja_col.insert_one(corte_data)
-    
+
+    # MARCAR LOS TICKETS COMO PROCESADOS PARA QUE EL PRÓXIMO TURNO EMPIECE EN $0.00
     if ids_tickets_a_cerrar:
         tickets_col.update_many(
             {"_id": {"$in": ids_tickets_a_cerrar}},
@@ -323,8 +308,10 @@ def corte_caja_automatico(correo: str):
         "total_acumulado": total_efectivo
     }
 
+# HISTORIAL DE CORTES PARA EL ADMIN / ENCARGADO
 @app.get("/caja/cortes", tags=["Corte de Caja"])
 def listar_cortes_caja():
+    """Muestra la lista de cortes guardados"""
     cursor = cortes_caja_col.find()
     cortes = []
     for doc in cursor:
@@ -333,10 +320,10 @@ def listar_cortes_caja():
     return cortes
 
 # -------------------------------------------------------------
-# REGISTRAR CONSUMO PROPIO (NOTIFICA POR WEBSOCKET)
+# REGISTRAR CONSUMO PROPIO
 # -------------------------------------------------------------
 @app.post("/consumo-propio", tags=["Productos"])
-async def registrar_consumo_propio(req: dict):
+def registrar_consumo_propio(req: dict):
     producto_id = req.get("codigo_barras") or req.get("producto_id")
     cantidad = int(req.get("cantidad", 1))
     correo_usuario = req.get("correo_usuario") or req.get("correo") or "carlos.mendoza@tiendita.com"
@@ -364,15 +351,12 @@ async def registrar_consumo_propio(req: dict):
         "costo_real": precio_unitario * cantidad,
         "vendedor_correo": correo_usuario,
         "tipo": "CONSUMO_PROPIO",
-        "procesado_en_corte": True,
+        "procesado_en_corte": True,         # <-- CLAVE: Marcado True para que el corte NO lo tome jamás
         "motivo": motivo,
         "fecha": fecha_actual.strftime("%Y-%m-%d %H:%M:%S")
     }
     
     tickets_col.insert_one(registro_consumo)
-    
-    # EMISIÓN EN TIEMPO REAL
-    await manager.broadcast("PRODUCTO_ACTUALIZADO")
     
     return {
         "status": "success",
@@ -380,9 +364,9 @@ async def registrar_consumo_propio(req: dict):
         "inventario_nuevo": inventario_actual - cantidad
     }
 
-# 7. MÓDULO DE PRODUCTOS (CREAR, ACTUALIZAR Y ELIMINAR NOTIFICAN AL WEBSOCKET)
+# 7. MÓDULO DE PRODUCTOS
 @app.post("/productos", tags=["Productos"], status_code=status.HTTP_201_CREATED)
-async def crear_producto(producto: ProductoSchema, token_data: dict = Depends(verificar_permiso_encargado)):
+def crear_producto(producto: ProductoSchema, token_data: dict = Depends(verificar_permiso_encargado)):
     existe = productos_col.find_one({"_id": producto.id})
     if existe:
         raise HTTPException(
@@ -391,21 +375,20 @@ async def crear_producto(producto: ProductoSchema, token_data: dict = Depends(ve
         )
     nuevo_prod = producto.dict(by_alias=True)
     
+    # Inyectamos metadatos del sistema
     nuevo_prod["fecha_creacion"] = datetime.utcnow().strftime("%Y-%m-%d")
     nuevo_prod["fecha_actualizacion"] = datetime.utcnow().strftime("%Y-%m-%d")
     nuevo_prod["creado_por"] = token_data.get("nombre", "AppAndroid")
     
     productos_col.insert_one(nuevo_prod)
-    
-    # EMISIÓN EN TIEMPO REAL
-    await manager.broadcast("PRODUCTO_ACTUALIZADO")
-    
     return {"status": "success", "message": f"Producto '{producto.nombre}' registrado con éxito por Encargado."}
+
 
 @app.get("/productos", tags=["Productos"], response_model=List[ProductoSchema])
 def listar_productos():
     cursor = productos_col.find({"activo": True})
     return [doc for doc in cursor]
+
 
 @app.get("/productos/{producto_id}", tags=["Productos"], response_model=ProductoSchema)
 def obtener_producto_por_id(producto_id: str):
@@ -414,8 +397,9 @@ def obtener_producto_por_id(producto_id: str):
         raise HTTPException(status_code=404, detail="Producto no encontrado.")
     return producto
 
+
 @app.put("/productos/{producto_id}", tags=["Productos"])
-async def actualizar_producto(producto_id: str, datos_actualizados: ProductoSchema, token_data: dict = Depends(verificar_permiso_encargado)):
+def actualizar_producto(producto_id: str, datos_actualizados: ProductoSchema, token_data: dict = Depends(verificar_permiso_encargado)):
     producto_existente = productos_col.find_one({"_id": producto_id})
     if not producto_existente:
         raise HTTPException(status_code=404, detail="El producto no existe en la tiendita.")
@@ -450,9 +434,6 @@ async def actualizar_producto(producto_id: str, datos_actualizados: ProductoSche
         {"$set": datos_dict}
     )
     
-    # EMISIÓN EN TIEMPO REAL
-    await manager.broadcast("PRODUCTO_ACTUALIZADO")
-    
     return {
         "status": "success", 
         "message": f"Producto '{datos_actualizados.nombre}' actualizado correctamente. Auditoría de precios registrada."
@@ -468,18 +449,42 @@ def obtener_historial_precios(producto_id: str, token_data: dict = Depends(verif
         "historial": historial
     }
 
+@app.post("/ventas", tags=["Productos"])
+def realizar_venta_producto(venta_req: dict):
+    producto_id = venta_req.get("codigo_barras")
+    cantidad = venta_req.get("cantidad", 1)
+    
+    producto = productos_col.find_one({"_id": producto_id})
+    if not producto:
+        raise HTTPException(status_code=404, detail="Producto no encontrado.")
+    
+    inventario_actual = producto.get("inventario", 0)
+    if inventario_actual < cantidad:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Solo quedan {inventario_actual} unidades disponibles."
+        )
+    
+    productos_col.update_one(
+        {"_id": producto_id},
+        {"$inc": {"inventario": -cantidad}}
+    )
+    
+    return {
+        "status": "sold",
+        "inventario_nuevo": inventario_actual - cantidad
+    }
+
 @app.delete("/productos/{producto_id}", tags=["Productos"])
-async def eliminar_producto(producto_id: str, token_data: dict = Depends(verificar_permiso_encargado)):
+def eliminar_producto(producto_id: str, token_data: dict = Depends(verificar_permiso_encargado)):
     resultado = productos_col.update_one({"_id": producto_id}, {"$set": {"activo": False}})
     if resultado.matched_count == 0:
         raise HTTPException(status_code=404, detail="Producto no encontrado.")
-    
-    # EMISIÓN EN TIEMPO REAL
-    await manager.broadcast("PRODUCTO_ACTUALIZADO")
-    
     return {"status": "success", "message": "Producto dado de baja exitosamente."}
 
-# 8. MÓDULO DE CATEGORÍAS
+
+# 8. MÓDULO DE CATEGORÍAS (PROTEGIDO)
+
 @app.post("/categorias", tags=["Categorías"], status_code=status.HTTP_201_CREATED)
 def crear_categoria(categoria: CategoriaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
     regex = crear_regex_insensible(categoria.nombre)
@@ -506,6 +511,7 @@ def actualizar_categoria(nombre: str, categoria: CategoriaSchema, token_data: di
     if resultado.matched_count == 0:
         raise HTTPException(status_code=404, detail="La categoría no existe.")
     
+    # Actualización en cascada para productos existentes
     if nombre != categoria.nombre:
         productos_col.update_many(
             {"categoria_nombre": {"$regex": regex, "$options": "i"}},
@@ -518,6 +524,7 @@ def actualizar_categoria(nombre: str, categoria: CategoriaSchema, token_data: di
 def eliminar_categoria(nombre: str, token_data: dict = Depends(verificar_permiso_encargado)):
     regex = crear_regex_insensible(nombre)
     
+    # Validación contra productos huérfanos
     producto_asociado = productos_col.find_one({
         "categoria_nombre": {"$regex": regex, "$options": "i"},
         "activo": True
@@ -528,13 +535,16 @@ def eliminar_categoria(nombre: str, token_data: dict = Depends(verificar_permiso
             status_code=400, 
             detail=f"No se puede eliminar la categoría '{nombre}' porque tiene productos activos asociados (ej. '{producto_asociado['nombre']}')."
         )
+
     resultado = categorias_col.delete_one({"nombre": {"$regex": regex, "$options": "i"}})
     if resultado.deleted_count == 0:
         raise HTTPException(status_code=404, detail="La categoría no existe.")
         
     return {"status": "success", "message": f"Categoría '{nombre}' eliminada correctamente."}
 
-# 9. MÓDULO DE PROVEEDORES Y DISTRIBUIDORES
+
+# 9. MÓDULO DE PROVEEDORES Y DISTRIBUIDORES (NUEVAS COLECCIONES)
+
 @app.get("/proveedores", tags=["Proveedores"])
 def listar_proveedores():
     cursor = proveedores_col.find()
@@ -561,7 +571,9 @@ def crear_distribuidor(dist: DistribuidorSchema, token_data: dict = Depends(veri
     distribuidores_col.insert_one(dist.dict())
     return {"status": "success", "message": f"Distribuidor '{dist.nombre}' registrado correctamente."}
 
-# 10. MÓDULO DE MARCAS
+
+# 10. MÓDULO DE MARCAS (PROTEGIDO Y ACTUALIZADO)
+
 @app.post("/marcas", tags=["Marcas"], status_code=status.HTTP_201_CREATED)
 def crear_marca(marca: MarcaSchema, token_data: dict = Depends(verificar_permiso_encargado)):
     regex = crear_regex_insensible(marca.nombre)
@@ -597,17 +609,20 @@ def actualizar_marca(nombre: str, marca: MarcaSchema, token_data: dict = Depends
     if resultado.matched_count == 0:
         raise HTTPException(status_code=404, detail="La marca no existe.")
     
+    # Actualización en cascada para productos existentes
     if nombre != marca.nombre:
         productos_col.update_many(
             {"marca_nombre": {"$regex": regex, "$options": "i"}},
             {"$set": {"marca_nombre": marca.nombre}}
         )
+
     return {"status": "success", "message": f"Marca '{nombre}' actualizada correctamente."}
 
 @app.delete("/marcas/{nombre}", tags=["Marcas"])
 def eliminar_marca(nombre: str, token_data: dict = Depends(verificar_permiso_encargado)):
     regex = crear_regex_insensible(nombre)
     
+    # Validación contra productos huérfanos
     producto_asociado = productos_col.find_one({
         "marca_nombre": {"$regex": regex, "$options": "i"},
         "activo": True
@@ -618,6 +633,7 @@ def eliminar_marca(nombre: str, token_data: dict = Depends(verificar_permiso_enc
             status_code=400, 
             detail=f"No se puede eliminar la marca '{nombre}' porque tiene productos activos asociados (ej. '{producto_asociado['nombre']}')."
         )
+
     resultado = marcas_col.delete_one({"nombre": {"$regex": regex, "$options": "i"}})
     if resultado.deleted_count == 0:
         raise HTTPException(status_code=404, detail="La marca no existe.")
