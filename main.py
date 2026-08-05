@@ -13,7 +13,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi import WebSocket, WebSocketDisconnect
 
-
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
     title="API de Punto de Venta e Inventario",
@@ -101,6 +100,9 @@ class HistorialPrecioSchema(BaseModel):
     fecha_cambio: str
     modificado_por: str
 
+# -------------------------------------------------------------
+# 📡 CONNECTION MANAGER (MODIFICADO PARA SEGURIDAD EN BROADCAST)
+# -------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
@@ -114,7 +116,7 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
-        # Transmite a todos los dispositivos conectados
+        # Transmite a todos usando copia de la lista para prevenir errores de iteración
         for connection in list(self.active_connections):
             try:
                 await connection.send_text(message)
@@ -122,7 +124,6 @@ class ConnectionManager:
                 self.disconnect(connection)
 
 manager = ConnectionManager()
-
 security = HTTPBearer()
 
 def verificar_permiso_encargado(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -271,6 +272,7 @@ def corte_caja_automatico(correo: str):
     else:
         rol = usuario_db.get("rol", "Cajero")
         nombre = usuario_db.get("nombre", "Empleado")
+
     if rol == "Encargado":
         return {
             "status": "skipped",
@@ -291,6 +293,7 @@ def corte_caja_automatico(correo: str):
     tickets_pendientes = list(tickets_col.find(filtro_tickets))
     total_efectivo = 0.0
     ids_tickets_a_cerrar = []
+
     for ticket in tickets_pendientes:
         try:
             total_efectivo += float(ticket.get("total", 0.0))
