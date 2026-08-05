@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi import WebSocket, WebSocketDisconnect
 
+
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
     title="API de Punto de Venta e Inventario",
@@ -122,6 +123,22 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+security = HTTPBearer()
+
+def verificar_permiso_encargado(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Token no proporcionado")
+    
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        
+        if payload.get("rol") != "Encargado":
+            raise HTTPException(status_code=403, detail="No tienes permisos (Requiere Encargado)")
+        return payload
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+
 # 4. FUNCIONES AUXILIARES PARA JWT, BÚSQUEDA Y CONTROL DE ACCESO
 def crear_regex_insensible(texto: str) -> str:
     texto_normalizado = unicodedata.normalize('NFD', texto)
@@ -133,20 +150,6 @@ def crear_access_token(data: dict, expires_delta: timedelta = timedelta(hours=2)
     expire = datetime.utcnow() + expires_delta
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-def verificar_permiso_encargado(authorization: Optional[str] = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Token no proporcionado")
-    
-    try:
-        token = authorization.split(" ")[1]
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        
-        if payload.get("rol") != "Encargado":
-            raise HTTPException(status_code=403, detail="No tienes permisos (Requiere Encargado)")
-        return payload
-    except Exception:
-        raise HTTPException(status_code=401, detail="Token inválido o expirado")
 
 @app.websocket("/ws/productos")
 async def websocket_endpoint(websocket: WebSocket):
