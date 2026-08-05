@@ -374,9 +374,16 @@ def listar_productos():
     cursor = productos_col.find({"activo": True})
     productos = []
     for doc in cursor:
-        doc["_id"] = str(doc["_id"])  # Fuerza _id a String para evitar fallos de parseo en Android
-        if "proveedor" in doc and isinstance(doc["proveedor"], dict):
-            doc["proveedor"] = doc["proveedor"].get("nombre", "General")
+        doc["_id"] = str(doc["_id"])  # Fuerza _id a String
+        
+        # Si proveedor no es un diccionario (o es String/None), lo convertimos a un diccionario válido
+        if not isinstance(doc.get("proveedor"), dict):
+            nombre_prov = str(doc.get("proveedor")) if doc.get("proveedor") else "General"
+            doc["proveedor"] = {
+                "_id": None,
+                "nombre": nombre_prov
+            }
+            
         productos.append(doc)
     return productos
 
