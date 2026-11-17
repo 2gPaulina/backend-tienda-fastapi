@@ -11,6 +11,7 @@ from pymongo import MongoClient
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+import dns.resolver
 
 # 1. INSTANCIAR FASTAPI
 app = FastAPI(
