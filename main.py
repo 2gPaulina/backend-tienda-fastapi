@@ -36,7 +36,8 @@ dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
 dns.resolver.default_resolver.nameservers = ["8.8.8.8", "8.8.4.4"]
 
 # 2. CONEXIÓN A MONGODB ATLAS
-MONGO_URI = "mongodb+srv://paulinagarcia_db_user:ORH5JJkOLEmbdjPn@cluster0.j5bk6c4.mongodb.net/?appName=Cluster0"
+MONGO_URI = "mongodb+srv://paulinagarcia_db_user:J5jynXy1zvkYPDcP@cluster0.ulaoudo.mongodb.net/"
+
 
 try:
     client = MongoClient(MONGO_URI)
