@@ -31,6 +31,9 @@ app.add_middleware(
 JWT_SECRET = "super_secret_key_12345"
 JWT_ALGORITHM = "HS256"
 
+dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
+dns.resolver.default_resolver.nameservers = ["8.8.8.8", "8.8.4.4"]
+
 # 2. CONEXIÓN A MONGODB ATLAS
 MONGO_URI = "mongodb+srv://paulinagarcia_db_user:ORH5JJkOLEmbdjPn@cluster0.j5bk6c4.mongodb.net/?appName=Cluster0"
 
