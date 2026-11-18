@@ -41,7 +41,7 @@ MONGO_URI = "mongodb+srv://paulinagarcia_db_user:J5jynXy1zvkYPDcP@cluster0.ulaou
 
 try:
     client = MongoClient(MONGO_URI)
-    db = client["puntoventaGCP"]  
+    db = client["productos"]  
     usuarios_col = db["usuarios"]
     productos_col = db["productos"]
     categorias_col = db["categorias"]
@@ -604,3 +604,8 @@ def eliminar_marca(nombre: str, token_data: dict = Depends(verificar_permiso_enc
         raise HTTPException(status_code=404, detail="La marca no existe.")
         
     return {"status": "success", "message": f"Marca '{nombre}' eliminada correctamente."}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
